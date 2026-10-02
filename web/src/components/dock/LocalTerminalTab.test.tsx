@@ -8,10 +8,14 @@ import { LocalTerminalTab } from './LocalTerminalTab'
 
 const state = vi.hoisted(() => ({
   context: 'staging',
+  firstContext: 'production',
   props: new Map<string, LocalTerminalTabProps>(),
 }))
 vi.mock('../../context/ConnectionContext', () => ({
   useConnection: () => ({ connection: { context: state.context } }),
+}))
+vi.mock('@tanstack/react-query', () => ({
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }))
 vi.mock('@skyhook-io/k8s-ui', async () => {
   const dock = await import('../../../../packages/k8s-ui/src/components/dock/DockContext')
@@ -33,13 +37,13 @@ let element: HTMLDivElement
 function Harness() {
   const { tabs, addTab } = useDock()
   useEffect(() => {
-    addTab({ type: 'local-terminal', title: 'Terminal', initialCommand: 'first' })
-    addTab({ type: 'local-terminal', title: 'Auth', initialCommand: 'second' })
+    addTab({ type: 'local-terminal', title: 'Terminal', initialCommand: 'first', localTerminalContext: state.firstContext })
+    addTab({ type: 'local-terminal', title: 'Auth', initialCommand: 'second', localTerminalContext: 'staging' })
   }, [addTab])
   return <>{tabs.map(tab => (
     <section key={tab.id}>
       <h2 data-tooltip={tab.titleTooltip}>{tab.title}</h2>
-      <LocalTerminalTab tabId={tab.id} title={tab.title} initialCommand={tab.initialCommand} />
+      <LocalTerminalTab tabId={tab.id} title={tab.title} intendedContext={tab.localTerminalContext!} initialCommand={tab.initialCommand} />
     </section>
   ))}</>
 }
@@ -48,6 +52,7 @@ async function render() {
 }
 beforeEach(() => {
   state.context = 'staging'
+  state.firstContext = 'production'
   state.props.clear()
   element = document.createElement('div')
   document.body.appendChild(element)
@@ -62,40 +67,41 @@ afterEach(async () => {
 
 it('waits for server metadata, labels each tab independently, and notices a UI switch', async () => {
   await render()
-  expect(element.textContent).toContain('Context not confirmed')
-  expect(element.querySelector('[role="status"]')).toBeNull()
+  expect(element.textContent).toContain('Requested:production')
   await act(async () => {
     state.props.get('first')!.onSessionInfo!({ context: 'production', kubeconfigIsolated: true })
     state.props.get('second')!.onSessionInfo!({ context: 'staging', kubeconfigIsolated: true })
   })
   expect([...element.querySelectorAll('h2')].map(el => el.textContent)).toEqual(['Terminal · production', 'Auth · staging'])
-  expect(element.querySelector('[role="status"]')?.getAttribute('aria-label')).toContain('This terminal was opened for production')
+  expect(element.querySelector('[role="status"]')?.getAttribute('aria-label')).toContain('This terminal is for production')
   expect(element.querySelector('[role="status"]')?.closest('[data-testid="terminal-toolbar"]')).not.toBeNull()
   state.context = 'production'
   await render()
   const sections = element.querySelectorAll('section')
   expect(sections[0].querySelector('[role="status"]')).toBeNull()
   expect(sections[0].textContent).toContain('Opened for:production')
-  expect(sections[1].querySelector('[role="status"]')?.getAttribute('aria-label')).toContain('This terminal was opened for staging')
+  expect(sections[1].querySelector('[role="status"]')?.getAttribute('aria-label')).toContain('This terminal is for staging')
   await act(async () => sections[1].querySelector<HTMLButtonElement>('button')!.click())
   expect([...element.querySelectorAll('h2')].map(el => el.textContent)).toEqual(['Terminal · production', 'Auth · staging', 'Terminal'])
 })
 
 it('marks fallback sessions unconfirmed and replaces labels for a newly connected shell', async () => {
   await render()
+  await act(async () => state.props.get('second')!.onSessionInfo!({ context: 'staging', kubeconfigIsolated: true }))
   await act(async () => state.props.get('second')!.onSessionInfo!({ context: '', kubeconfigIsolated: false }))
   const section = element.querySelectorAll('section')[1]
   expect(section.textContent).toContain('Auth · context not confirmed')
   expect(section.textContent).toContain('Context not confirmed')
   expect(section.querySelector('[role="status"]')).toBeNull()
   await act(async () => state.props.get('second')!.onSessionInfo!(null))
-  expect(section.querySelector('h2')?.textContent).toBe('Auth')
+  expect(section.querySelector('h2')?.textContent).toBe('Auth · context not confirmed')
   await act(async () => state.props.get('second')!.onSessionInfo!({ context: 'staging', kubeconfigIsolated: true }))
   expect(section.querySelector('h2')?.textContent).toBe('Auth · staging')
 })
 
 it('compares full contexts even when both have the same short cluster name', async () => {
   state.context = 'gke_project-b_us-east1_production'
+  state.firstContext = 'gke_project-a_us-east1_production'
   await render()
   await act(async () => state.props.get('first')!.onSessionInfo!({ context: 'gke_project-a_us-east1_production', kubeconfigIsolated: true }))
   expect(element.querySelector('h2')?.textContent).toBe('Terminal · production')
